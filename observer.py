@@ -54,7 +54,15 @@ RE_NEW_CHANGE = re.compile(
     r"openspec\s+new\s+change\s+[" + "'" + r"]?([A-Za-z0-9._-]+)"
 )
 
-OUTPUT_MATCH_REGEX = r"opsx|openspec"
+# Subscription filter for pane.output_matched. Herdr fires an event only when
+# the match state of the pane changes, so the pattern must not match text
+# that is always on screen: a bare `openspec` alternative would match the
+# shell prompt of every pane whose cwd contains openspec-herdr and suppress
+# all events. Phrase alternatives never appear in prompts.
+OUTPUT_MATCH_REGEX = (
+    r"opsx|openspec instructions apply|openspec new change"
+    r"|openspec-apply|openspec-explore|openspec-propose"
+)
 
 
 def find_repo_root(cwd):
@@ -769,6 +777,13 @@ def run_event_tests(repo):
     check(
         "underscore pane_created is tolerated",
         "p4" in observer.panes,
+    )
+
+    # the subscription pattern must not match a plain shell prompt
+    prompt = "ps@gateway-host:~/work/openspec-herdr $ "
+    check(
+        "subscription pattern does not match the shell prompt",
+        re.search(OUTPUT_MATCH_REGEX, prompt) is None,
     )
 
     return failures == 0
