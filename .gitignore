@@ -1,0 +1,4 @@
+openspec/
+.claude/
+.opencode/
+__pycache__/
