@@ -36,7 +36,7 @@ observer_status() {
 
 log() {
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-  printf '[%s] %s\n' "$(date -Is)" "$*" >> "$LOG_FILE" 2>/dev/null || true
+  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 # Pure-bash trim of surrounding whitespace.
