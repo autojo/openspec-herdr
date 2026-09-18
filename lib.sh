@@ -12,10 +12,19 @@ WATCH_FILE="${WATCH_FILE:-$CONFIG_DIR/watch.txt}"
 LOG_FILE="${LOG_FILE:-$STATE_DIR/plugin.log}"
 RUNNERS_FILE="${RUNNERS_FILE:-$CONFIG_DIR/runners.toml}"
 LOCK_FILE="${LOCK_FILE:-$STATE_DIR/observer.lock}"
+PID_FILE="${PID_FILE:-$STATE_DIR/observer.pid}"
 
-# "observer running"/"observer not running" based on the observer's flock.
+# "observer running"/"observer not running" based on the observer's flock,
+# or on its pid file where flock is missing (macOS).
 observer_status() {
-  if [ -f "$LOCK_FILE" ] && ! flock -n "$LOCK_FILE" -c true 2>/dev/null; then
+  local running=1 pid
+  if command -v flock >/dev/null 2>&1; then
+    [ -f "$LOCK_FILE" ] && ! flock -n "$LOCK_FILE" -c true 2>/dev/null && running=0
+  elif [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && running=0
+  fi
+  if [ "$running" -eq 0 ]; then
     printf 'observer running'
   else
     printf 'observer not running'

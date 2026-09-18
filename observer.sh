@@ -29,18 +29,37 @@ check_deps() {
   fi
 }
 
-# Detached daemon start, guarded against double starts with flock: the lock
-# is handed to the python process, so a second run exits immediately.
+# Detached daemon start, guarded against double starts. With flock the lock
+# is handed to the python process, so a second run exits immediately; where
+# flock is missing (macOS) the pid file decides.
+observer_alive() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null)" || return 1
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 start_observer() {
   mkdir -p "$STATE_DIR"
-  command -v python3 >/dev/null 2>&1 || return 0
-  exec 9>"$LOCK_FILE"
-  flock -n 9 || {
-    log "observer: already running (lock held)"
-    exec 9>&-
+  command -v python3 >/dev/null 2>&1 || {
+    log "observer: python3 missing; not started"
     return 0
   }
-  nohup python3 "$ROOT/observer.py" >>"$OBSERVER_LOG" 2>&1 </dev/null 9<&9 &
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || {
+      log "observer: already running (lock held)"
+      exec 9>&-
+      return 0
+    }
+    nohup python3 "$ROOT/observer.py" >>"$OBSERVER_LOG" 2>&1 </dev/null 9<&9 &
+  else
+    if observer_alive; then
+      log "observer: already running (pid $(cat "$PID_FILE"))"
+      return 0
+    fi
+    nohup python3 "$ROOT/observer.py" >>"$OBSERVER_LOG" 2>&1 </dev/null &
+  fi
   echo $! > "$PID_FILE"
   log "observer: spawned pid $!"
 }

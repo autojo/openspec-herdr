@@ -74,6 +74,8 @@ Repos come from the open Herdr panes: every pane working directory that has
 an `openspec/changes` directory (or an ancestor with one) is watched. Add
 repos without an open pane to `watch.txt` in the plugin config directory
 (`herdr plugin config-dir openspec.picker`), one absolute path per line.
+`watch.txt` only affects the picker list; tab labels and sidebar tokens
+always come from the pane the agent runs in.
 
 ### Runners
 
@@ -108,6 +110,21 @@ plugin and a Claude Code hook. Those are gone; the observer replaces them.
 - Move your `runners.toml` from the old config directory to the new one
   (`herdr plugin config-dir openspec.picker`), or let the plugin generate a
   fresh one from your installed agents.
+
+## Troubleshooting
+
+Tabs are not renamed and the sidebar shows no phase: check that the
+observer daemon is running.
+
+- `herdr plugin log list` shows the `startup` run of `observer.sh` with its
+  exit code and stderr.
+- `pgrep -af observer.py` lists the daemon.
+- `observer.log` and `plugin.log` live in the plugin state directory Herdr
+  passes as `HERDR_PLUGIN_STATE_DIR` (Linux: `~/.local/state/herdr/plugins/openspec.picker/`).
+  A healthy log ends with `subscribed via …`, `reconstructed N panes`,
+  `watching`; each `/opsx:…` line in a pane adds a `signal …` entry.
+- The daemon needs `python3`; the picker additionally needs `jq`, `fzf` and
+  `curl`. Missing tools are reported once as a Herdr notification.
 
 ## License
 
