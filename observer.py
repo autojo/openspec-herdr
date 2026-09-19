@@ -255,7 +255,6 @@ class Observer:
         # after the previous instance's sequence numbers.
         self.seq = int(time.time() * 1000)
         self.resubscribe = False
-        self.reconcile = False
 
     # --- state helpers -------------------------------------------------
 
@@ -272,7 +271,7 @@ class Observer:
                 "tab_id": None,
                 "phase": None,
                 "change": None,
-                "labeled_for": None,
+                "label": None,
                 "last_title": None,
             }
             self.panes[pane_id] = pane
@@ -296,6 +295,13 @@ class Observer:
             tokens["os_change"] = change
         if not tokens:
             return
+        # Display-only metadata: repeating the same values on every reconcile
+        # re-renders the sidebar (visible flicker in agent panes). Only report
+        # when the tokens actually changed.
+        pane = self.pane(pane_id)
+        if pane.get("reported") == (phase, change):
+            return
+        pane["reported"] = (phase, change)
         self.requests.call(
             "pane.report_metadata",
             {
@@ -312,6 +318,17 @@ class Observer:
         self.requests.call(
             "tab.rename", {"tab_id": tab_id, "label": label}
         )
+
+    def set_tab_label(self, pane, label):
+        """Renames the tab only when the label actually changes. Herdr marks
+        every tab.rename as a UI change, so repeating an unchanged label on
+        each reconcile would make the whole client redraw (flicker)."""
+        if not pane["tab_id"] or not label:
+            return
+        if pane.get("label") == label:
+            return
+        pane["label"] = label
+        self.rename_tab(pane["tab_id"], label)
 
     # --- signal handling ------------------------------------------------
 
@@ -333,23 +350,20 @@ class Observer:
         change = pane["change"]
         phase = pane["phase"]
         if change:
-            if pane["labeled_for"] == change:
-                return
             if phase == "apply":
                 label = change
             else:
                 label = "? %s" % change
-            pane["labeled_for"] = change
-            self.rename_tab(pane["tab_id"], label)
+            self.set_tab_label(pane, label)
             return
         if phase == "explore":
             title = pane.get("last_title")
             if title:
-                self.rename_tab(
-                    pane["tab_id"], "? %s" % title[:MAX_LABEL_LEN]
+                self.set_tab_label(
+                    pane, "? %s" % title[:MAX_LABEL_LEN]
                 )
             else:
-                self.rename_tab(pane["tab_id"], "? explore")
+                self.set_tab_label(pane, "? explore")
 
     def handle_title(self, pane_id, title):
         """Follows the stripped terminal title while no change is known."""
@@ -364,7 +378,7 @@ class Observer:
             return
         pane["last_title"] = title
         self.log("title %s %s" % (pane_id, title))
-        self.rename_tab(pane["tab_id"], "? %s" % title[:MAX_LABEL_LEN])
+        self.set_tab_label(pane, "? %s" % title[:MAX_LABEL_LEN])
 
     def handle_line(self, pane_id, line):
         pane = self.pane(pane_id)
@@ -413,10 +427,16 @@ class Observer:
 
     # --- lifecycle --------------------------------------------------------
 
-    def reconstruct(self):
-        """Reads existing panes once and applies the rules to their output.
-        The pane set is pruned to the current pane.list, so panes that
-        closed while the observer was disconnected are forgotten."""
+    def reconstruct(self, read_output=True):
+        """Refreshes the pane set from pane.list and, when read_output is
+        set, reads the pane output once and applies the rules to it. The pane
+        set is pruned to the current pane.list, so panes that closed while the
+        observer was disconnected are forgotten.
+
+        Reading output is only safe while no output_matched subscription is
+        active: doing both makes the client redraw (flicker). Periodic ticks
+        therefore refresh without reading and re-subscribe instead, which
+        replays the current matches."""
         result = self.requests.call("pane.list", {})
         if not result:
             self.log("pane.list failed; nothing reconstructed")
@@ -431,12 +451,18 @@ class Observer:
             pane_id = info.get("pane_id")
             if not pane_id:
                 continue
+            if pane_id not in self.panes:
+                # No output_matched subscription for this pane yet; add it on
+                # the next re-subscribe (events for it may have been missed).
+                self.resubscribe = True
             pane = self.pane(pane_id)
             pane["cwd"] = info.get("cwd") or info.get("foreground_cwd")
             pane["tab_id"] = info.get("tab_id")
             title = info.get("terminal_title_stripped")
             if title and not is_shell_prompt(title):
                 pane["last_title"] = title
+            if not read_output:
+                continue
             read = self.requests.call(
                 "pane.read",
                 {"pane_id": pane_id, "source": "recent", "strip_ansi": True},
@@ -519,7 +545,6 @@ class Observer:
             self.subscription.connect()
             self.subscribe_all()
             self.resubscribe = False
-            self.reconcile = False
             self.log("watching")
             next_reconcile = time.time() + RECONCILE_INTERVAL
             while not self.resubscribe:
@@ -527,17 +552,17 @@ class Observer:
                 if name:
                     self.handle_event(name, data)
                 # Herdr 0.9.0 delivers subscription events unreliably, so
-                # periodically re-scan the pane set and their output. The
-                # re-subscribe also replays all current matches.
+                # periodically refresh the pane set and re-subscribe, which
+                # replays the current matches. The pane output is not read
+                # here: reading while the output_matched subscription is
+                # active makes the client redraw (flicker).
                 if time.time() >= next_reconcile:
-                    self.reconcile = True
-                    break
+                    self.log("reconciling")
+                    self.reconstruct(read_output=False)
+                    self.resubscribe = True
+                    next_reconcile = time.time() + RECONCILE_INTERVAL
             self.subscription.close()
-            if self.reconcile:
-                self.log("reconciling")
-                self.reconstruct()
-            else:
-                self.log("re-subscribing after pane change")
+            self.log("re-subscribing after pane change")
 
 
 def run_tests():
@@ -726,7 +751,6 @@ def run_event_tests(repo):
 
     # after a change name is known, titles stop renaming
     pane["change"] = "add-auth"
-    pane["labeled_for"] = "add-auth"
     observer.requests.calls.clear()
     observer.handle_event(
         "pane.updated",
@@ -742,6 +766,90 @@ def run_event_tests(repo):
         "pane.updated stops renaming after the change is known",
         not any(
             method == "tab.rename" for method, _ in observer.requests.calls
+        ),
+    )
+
+    # repeated reconciles must not re-rename an unchanged label
+    observer, logs = make_observer(repo)
+    pane = observer.pane("p5")
+    pane["cwd"] = "/repo"
+    pane["tab_id"] = "t5"
+    pane["phase"] = "explore"
+    observer.update_label("p5")
+    observer.requests.calls.clear()
+    observer.update_label("p5")
+    check(
+        "unchanged explore label is not renamed again",
+        not any(
+            method == "tab.rename" for method, _ in observer.requests.calls
+        ),
+    )
+
+    # a new change name still triggers a rename
+    pane["change"] = "add-auth"
+    observer.requests.calls.clear()
+    observer.update_label("p5")
+    check(
+        "a new change name still renames the tab",
+        ("tab.rename", {"tab_id": "t5", "label": "? add-auth"})
+        in observer.requests.calls,
+    )
+
+    # the same title twice is not renamed again
+    observer, logs = make_observer(repo)
+    pane = observer.pane("p6")
+    pane["cwd"] = "/repo"
+    pane["tab_id"] = "t6"
+    pane["phase"] = "explore"
+    observer.handle_event(
+        "pane.updated",
+        {
+            "pane": {
+                "pane_id": "p6",
+                "tab_id": "t6",
+                "terminal_title_stripped": "Same title",
+            }
+        },
+    )
+    observer.requests.calls.clear()
+    observer.handle_event(
+        "pane.updated",
+        {
+            "pane": {
+                "pane_id": "p6",
+                "tab_id": "t6",
+                "terminal_title_stripped": "Same title",
+            }
+        },
+    )
+    check(
+        "an unchanged title is not renamed again",
+        not any(
+            method == "tab.rename" for method, _ in observer.requests.calls
+        ),
+    )
+
+    # repeated identical token reports are suppressed
+    observer, logs = make_observer(repo)
+    pane = observer.pane("p7")
+    pane["cwd"] = repo
+    pane["tab_id"] = "t7"
+    observer.report_tokens("p7", "explore", "add-auth")
+    observer.requests.calls.clear()
+    observer.report_tokens("p7", "explore", "add-auth")
+    check(
+        "unchanged tokens are not reported again",
+        not any(
+            method == "pane.report_metadata"
+            for method, _ in observer.requests.calls
+        ),
+    )
+    observer.report_tokens("p7", "apply", "add-auth")
+    check(
+        "changed tokens are reported again",
+        any(
+            method == "pane.report_metadata"
+            for method, _ in observer.requests.calls
         ),
     )
 
